@@ -84,6 +84,11 @@ $dLogFile = Join-Path -Path $dLogPath -ChildPath $dLogName
 $dLogMaxAge = 30
 
 # Script SpecIfic
+$sStorageAccount = ""
+$sTableServiceEndpoint = "https://$sStorageAccount.table.core.windows.net"
+
+$sSASASTokenDeviceComplianceStatus = "?st="
+$sSATableNameDeviceComplianceStatus = "IMT"
 
 
 #-----------------------------------------------------------[Functions]----------------------------------------------------------------
@@ -162,6 +167,79 @@ Function ExtractIntuneAppDetailsFromLogFile() {
         }
     }
 }
+
+Function Get-AzureTableRow {
+    [CmdletBinding()]
+    Param
+    (
+        [parameter(Mandatory=$true)][string]$Endpoint,
+        [parameter(Mandatory=$true)][string]$SharedAccessSignature,
+        [parameter(Mandatory=$true)][string]$Table,
+        [parameter(Mandatory=$false)][string]$FilterDefinition
+    )
+    $Headers = @{
+        "x-ms-date"=(Get-Date -Format r)
+        "x-ms-version"="2016-05-31"
+        "Accept-Charset"="UTF-8"
+        "DataServiceVersion"="3.0;NetFx"
+        "MaxDataServiceVersion"="3.0;NetFx"
+        "Accept"="application/json;odata=nometadata"
+    };
+    If ($FilterDefinition -like $null) {
+        $URI = ($Endpoint + "/" + $Table + $SharedAccessSignature)
+    }
+    Else {
+        $URI = ($Endpoint + "/" + $Table + $SharedAccessSignature + "&`$filter=($FilterDefinition)")
+    }
+    $TableRow = Invoke-RestMethod -Method Get -Uri $URI -Headers $Headers -ContentType "application/json"
+    $TableRow.Value
+}
+
+Function Insert-AzureTableRow {
+    [CmdletBinding()]
+    Param
+    (
+        [parameter(Mandatory=$true)][string]$Endpoint,
+        [parameter(Mandatory=$true)][string]$SharedAccessSignature,
+        [parameter(Mandatory=$true)][string]$Table,
+        [parameter(Mandatory=$true)][hashtable]$TableData
+    )
+    $Headers = @{
+        "x-ms-date"=(Get-Date -Format r)
+        "x-ms-version"="2016-05-31"
+        "Accept-Charset"="UTF-8"
+        "DataServiceVersion"="3.0;NetFx"
+        "MaxDataServiceVersion"="3.0;NetFx"
+        "Accept"="application/json;odata=nometadata"
+    };
+    $URI = ($Endpoint + "/" + $Table + "/" + $SharedAccessSignature)
+    $Body = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $TableData))
+    Invoke-RestMethod -Method Post -Uri $URI -Headers $Headers -Body $Body -ContentType "application/json"
+}
+
+Function Update-AzureTableRow {
+    [CmdletBinding()]
+    Param
+    (
+        [parameter(Mandatory=$true)][string]$Endpoint,
+        [parameter(Mandatory=$true)][string]$SharedAccessSignature,
+        [parameter(Mandatory=$true)][string]$Table,
+        [parameter(Mandatory=$true)][hashtable]$TableData
+    )
+    $Headers = @{
+        "x-ms-date"=(Get-Date -Format r)
+        "x-ms-version"="2016-05-31"
+        "Accept-Charset"="UTF-8"
+        "DataServiceVersion"="3.0;NetFx"
+        "MaxDataServiceVersion"="3.0;NetFx"
+        "Accept"="application/json;odata=nometadata"
+    };
+    $Resource = "$Table(PartitionKey='$sPartitionKey',RowKey='$sRowKey')"
+	$URI = ($Endpoint + "/" + $Resource + $SharedAccessSignature)
+    $Body = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $TableData))
+    Invoke-RestMethod -Method Put -Uri $URI -Headers $Headers -Body $Body -ContentType "application/json"
+}
+
 
 #--------------------------------------------------------[PrepareDirectories]----------------------------------------------------------
 
