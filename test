@@ -1,0 +1,564 @@
+#Requires -Version 5
+<#
+.SYNOPSIS
+
+.DESCRIPTION
+
+.PARAMETER
+  None
+
+.INPUTS
+  None
+
+.OUTPUTS
+  None
+
+.NOTES
+  Script:				-Automate-UserDeviceComplianceManagement.ps1
+  Version:			    1.0
+  Template:				IME_PSTemplateScript.ps1
+  Template Version:		1.2
+  Company:				
+  Author:				Tom van Beest
+  Creation Date:		16-10-2023
+  Source(s):
+  Release notes:		Version 1.0 - Initial published version.
+
+
+.LINK
+
+.EXAMPLE
+  .\-Automate-UserDeviceComplianceManagement.ps1
+
+REQUIRED
+  
+  "Directory.Read.All",
+  "Group.ReadWrite.All",
+  "User.Read.All",
+  "DeviceManagementConfiguration.Read.All",
+  "DeviceManagementManagedDevices.Read.All",
+  "DeviceManagementServiceConfig.Read.All"
+
+USAGE
+  Make the relevant changes to the variables in the [Declarations] section to reflect the execution evironment of the script.
+
+  Information to be provided is:
+	Script Version	for 	$dScriptVersion 	Should correspond with Version in the .NOTES section
+	Script Name 	for 	$dScriptName		Should correspond with the actual file name (WITHOUT FILE EXTENSION) and Script (WITHOUT FILE EXTENSION) in the .NOTES section
+	Customer Name	for		$dCustomerName		The full name of the customer
+	Customer Abbr.	for		$dCustomerShortName	A three or four character alpanumeric (common) abbreviation of the customer
+
+IMPORTANT: Please test the script using PsExec first and check for errors before deploying it through IME!
+
+DISCLAIMER
+  THIS CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS"
+  WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+  INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
+
+  This script is provided "AS IS" with no warranties, and confers no rights.
+
+#>
+
+#---------------------------------------------------------[Initializations]------------------------------------------------------------
+
+$exitCode = 0
+
+Function Get-PSScriptRoot {
+    $ScriptRoot = ""
+    Try {
+        $ScriptRoot = Get-Variable -Name PSScriptRoot -ValueOnly -ErrorAction Stop
+    }
+    Catch {
+        $ScriptRoot = Split-Path $dcript:MyInvocation.MyCommand.Path
+    }
+    Write-Output $ScriptRoot
+}
+
+#----------------------------------------------------------[Declarations]--------------------------------------------------------------
+
+#Script Version
+$dScriptVersion = "1.1"
+$dScriptName = "-Automate-UserDeviceComplianceManagement"
+
+#Customer Specific Information
+$dCustomerName = "<CUSTOMER NAME>"
+$dCustomerShortName = "<CUSTOMER ABBREVIATION"
+
+#Log File Information
+$dTempPath = "$PSScriptRoot\Temp"
+
+#Script Specific
+$dAzureTenant = ""
+$dAzureTenantDomain = "$dAzureTenant.onmicrosoft.com"
+$dAzureTenantId = ""
+$dCommonUsersGroupName = ""
+
+$dRequiredAmountOfReliableComplianceEntries = 10
+
+$dStorageAccount = ""
+$dTableServiceEndpoint = "https://$dStorageAccount.table.core.windows.net"
+
+$dSASASTokenDeviceComplianceStatus = ""
+$dSATableNameDeviceComplianceStatus = ""
+
+$dSASASTokenUserDeviceComplianceManagement = ""
+$dSATableNameUserDeviceComplianceManagement = ""
+
+#-----------------------------------------------------------[Functions]----------------------------------------------------------------
+
+Function Get-AzureTableRow {
+    [CmdletBinding()]
+    Param
+    (
+        [parameter(Mandatory=$true)][string]$Endpoint,
+        [parameter(Mandatory=$true)][string]$SharedAccessSignature,
+        [parameter(Mandatory=$true)][string]$Table,
+        [parameter(Mandatory=$false)][string]$FilterDefinition
+    )
+    $Headers = @{
+        "x-ms-date"=(Get-Date -Format r)
+        "x-ms-version"="2016-05-31"
+        "Accept-Charset"="UTF-8"
+        "DataServiceVersion"="3.0;NetFx"
+        "MaxDataServiceVersion"="3.0;NetFx"
+        "Accept"="application/json;odata=nometadata"
+    };
+    If ($FilterDefinition -like $null) {
+        $URI = ($Endpoint + "/" + $Table + $SharedAccessSignature)
+    }
+    Else {
+        $URI = ($Endpoint + "/" + $Table + $SharedAccessSignature + "&`$filter=($FilterDefinition)")
+    }
+    $TableRow = Invoke-RestMethod -Method Get -Uri $URI -Headers $Headers -ContentType "application/json"
+    $TableRow.Value
+}
+
+Function Insert-AzureTableRow {
+    [CmdletBinding()]
+    Param
+    (
+        [parameter(Mandatory=$true)][string]$Endpoint,
+        [parameter(Mandatory=$true)][string]$SharedAccessSignature,
+        [parameter(Mandatory=$true)][string]$Table,
+        [parameter(Mandatory=$true)][hashtable]$TableData
+    )
+    $Headers = @{
+        "x-ms-date"=(Get-Date -Format r)
+        "x-ms-version"="2016-05-31"
+        "Accept-Charset"="UTF-8"
+        "DataServiceVersion"="3.0;NetFx"
+        "MaxDataServiceVersion"="3.0;NetFx"
+        "Accept"="application/json;odata=nometadata"
+    };
+    $URI = ($Endpoint + "/" + $Table + "/" + $SharedAccessSignature)
+    $Body = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $TableData))
+    Invoke-RestMethod -Method Post -Uri $URI -Headers $Headers -Body $Body -ContentType "application/json"
+}
+
+Function Update-AzureTableRow {
+    [CmdletBinding()]
+    Param
+    (
+        [parameter(Mandatory=$true)][string]$Endpoint,
+        [parameter(Mandatory=$true)][string]$SharedAccessSignature,
+        [parameter(Mandatory=$true)][string]$Table,
+        [parameter(Mandatory=$true)][hashtable]$TableData
+    )
+    $Headers = @{
+        "x-ms-date"=(Get-Date -Format r)
+        "x-ms-version"="2016-05-31"
+        "Accept-Charset"="UTF-8"
+        "DataServiceVersion"="3.0;NetFx"
+        "MaxDataServiceVersion"="3.0;NetFx"
+        "Accept"="application/json;odata=nometadata"
+    };
+    $Resource = "$Table(PartitionKey='$dPartitionKey',RowKey='$dRowKey')"
+	$URI = ($Endpoint + "/" + $Resource + $SharedAccessSignature)
+    $Body = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $TableData))
+    Invoke-RestMethod -Method Put -Uri $URI -Headers $Headers -Body $Body -ContentType "application/json"
+}
+
+#--------------------------------------------------------[PrepareDirectories]----------------------------------------------------------
+
+$dScriptDirs = $dTempPath
+
+Foreach ($dDir in $dScriptDirs) {
+    If (!(Test-Path -Path $dDir)) {
+    	Try {
+    		New-Item -Path $dDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    		Write-Output "Succesfully created the directory $($dDir)."
+    	}
+    	Catch {
+    		Write-Error "Failed to create directory $($dDir). Exit code ($LastExitCode). Exception: $($_.Exception.Message)" -Category OperationStopped
+    	}
+    }
+    Else {
+    	Write-Output "Directory $($dDir) already existed."
+    }
+}
+
+#-----------------------------------------------------------[Execution]----------------------------------------------------------------
+
+#Script Execution Elements
+$dMgGraphCredential = Connect-MgGraph -ClientId "" -TenantId $dAzureTenantId -CertificateThumbprint ""
+
+$dCommonUsersGroup = (Get-MgGroup -ConsistencyLevel eventual -Count groupCount -Filter "DisplayName eq '$dCommonUsersGroupName'").Id   
+#$dEnabledUsers = Get-MgGroupMember -GroupId $dCommonUsersGroup -All | Where-Object {$_.AdditionalProperties.accountEnabled -eq $true} | Sort-Object {$_.AdditionalProperties.userPrincipalName} # Where-Object {$_.AdditionalProperties.userPrincipalName -eq ""} # 
+
+$dCommonUsersUri = $null
+$dCommonUsersUri = "https://graph.microsoft.com/beta/groups/$dCommonUsersGroup/members"
+$dCommonUsers = $null
+
+$dAllPages = @()
+$dCommonUsers = (Invoke-MgGraphRequest -Method Get -Uri $dCommonUsersUri -ContentType "application/json")
+$dAllPages += $dCommonUsers.value
+
+If ($dCommonUsers.'@odata.nextLink') {
+    Do {
+        $dCommonUsers = (Invoke-MgGraphRequest -Method Get -Uri $dCommonUsers.'@odata.nextLink' -ContentType "application/json")
+        $dAllPages += $dCommonUsers.value
+    } 
+    Until (!$dCommonUsers.'@odata.nextLink')
+}
+$dEnabledUsers = $null
+$dEnabledUsers = $dAllPages | Where-Object {$_.userPrincipalName -eq ""} #Where-Object {$_.accountEnabled -eq $true} | Sort-Object {$_.userPrincipalName} #  
+
+$dIntuneDevices = Get-MgDeviceManagementManagedDevice -All
+
+$dFixSystemAccountComplianceGroup = (Get-MgGroup -ConsistencyLevel eventual -Count groupCount -Filter "DisplayName eq 'Cloud_Intune_Devices_FixSystemAccountCompliance'").Id
+$dFixSystemAccountComplianceGroupMembers = Get-MgGroupMember -GroupId $dFixSystemAccountComplianceGroup -All
+
+$dFixCommonComplianceGroup = (Get-MgGroup -ConsistencyLevel eventual -Count groupCount -Filter "DisplayName eq 'Cloud_Intune_Devices_FixCommonCompliance'").Id
+$dFixCommonComplianceGroupMembers = Get-MgGroupMember -GroupId $dFixCommonComplianceGroup -All
+
+$dPreviousComplianceResults = Get-AzureTableRow -Endpoint $dTableServiceEndpoint -SharedAccessSignature $dSASASTokenUserDeviceComplianceManagement -Table $dSATableNameUserDeviceComplianceManagement
+
+### Remove disabled/unknown users from the Azure Storage Table.
+#Foreach ($dPreviousComplianceResult in $dPreviousComplianceResults) {
+#    If ($($dEnabledUsers.AdditionalProperties.userPrincipalName) -notcontains $($dPreviousComplianceResult.PartitionKey) -and $($dEnabledUsers.Id) -notcontains $($dPreviousComplianceResult.RowKey)) {
+#        Write-Output "User will be removed from the table."
+#    }
+#}
+
+Foreach ($dUser in $dEnabledUsers) {
+    $dReportDeviceLastSeenDays = $null
+    $dReportDeviceLastSeenDateTime = $null
+    $dReportDeviceLastSyncDateTime = $null
+    $dReportDeviceEnrollmentDateTime = $null
+    $dReportIncomplianceStatusState = $null
+    $dReportIncomplianceStatusCode = $null
+    $dReportIncomplianceStatusAction = $null
+    $dPreviousRunResult = $null
+    $dFirstReportDateTime = $null
+    $dResolvedDateTime = $null
+
+    ### Define user variables
+    $dUserObjectId = $dUser.Id
+    $dUserName = ($dUser.userPrincipalName).ToLower()
+    
+    ### Check for previous incompliance and match in EXACT (characters) username and ObjectId
+    If ($dPreviousComplianceResults.PartitionKey -ccontains "$dUserName") {
+        $dPreviousRunResult = $dPreviousComplianceResults | Where-Object {$_.RowKey -ceq "$dUserObjectId"}
+    }
+
+    ### Prepare a PS Object with all the devices of the user
+    $dUserAADDevices = $null
+    $dUserAADDevices = Get-MgUserRegisteredDevice -UserId $dUserObjectId
+    $dUserWindowsDevices = $null
+    $dUserWindowsDevices = Foreach ($dUserAADDevice in $dUserAADDevices) {
+    If ($dUserAADDevice.AdditionalProperties.trustType -eq "AzureAd" -and $dUserAADDevice.AdditionalProperties.operatingSystem -eq "Windows") {
+        $dDevice = $null
+        $dDevice = "" | Select Id,accountEnabled,approximateLastSignInDateTime,deviceId,displayName,enrollmentType,isCompliant,isManaged,managementType,operatingSystem,trustType
+        $dDevice.Id = $dUserAADDevice.Id
+        $dDevice.accountEnabled = $dUserAADDevice.AdditionalProperties.accountEnabled
+        $dDevice.approximateLastSignInDateTime = $dUserAADDevice.AdditionalProperties.approximateLastSignInDateTime
+        $dDevice.deviceId = $dUserAADDevice.AdditionalProperties.deviceId
+        $dDevice.displayName = $dUserAADDevice.AdditionalProperties.displayName
+        $dDevice.enrollmentType = $dUserAADDevice.AdditionalProperties.enrollmentType
+        $dDevice.isCompliant = $dUserAADDevice.AdditionalProperties.isCompliant
+        $dDevice.isManaged = $dUserAADDevice.AdditionalProperties.isManaged
+        $dDevice.managementType = $dUserAADDevice.AdditionalProperties.managementType
+        $dDevice.operatingSystem = $dUserAADDevice.AdditionalProperties.operatingSystem
+        $dDevice.trustType = $dUserAADDevice.AdditionalProperties.trustType
+        $dDevice
+        }
+    }   
+     
+    ### Check if the user's last used Windows device is compliant
+    $dUserLastUsedWindowsDevice = $null
+    $dUserLastUsedWindowsDevice = $dUserWindowsDevices | Sort-Object approximateLastSignInDateTime -Descending | Select -First 1
+    If ($dUserLastUsedWindowsDevice.isCompliant -eq $false) {
+        $dUserAADDeviceId = $dUserLastUsedWindowsDevice.deviceId
+        $dIntuneDevice = $null
+        $dIntuneDevice = $dIntuneDevices | Where-Object {$_.AzureAdDeviceId -eq $dUserAADDeviceId}
+
+        ### If first device is not managed by Intune (yet) select second device
+        If ($dIntuneDevice -eq $null) {
+            $dUserLastUsedWindowsDevice = $dUserWindowsDevices | Sort-Object approximateLastSignInDateTime -Descending | Select -Skip 1 | Select -First 1
+            If ($dUserLastUsedWindowsDevice -ne $null) {
+                $dUserAADDeviceId = $dUserLastUsedWindowsDevice.deviceId
+                $dIntuneDevice = $null
+                $dIntuneDevice = $dIntuneDevices | Where-Object {$_.AzureAdDeviceId -contains $dUserAADDeviceId}
+            }
+            Else {
+                Write-Output "$dUserName - $($dDevice.displayName) - NONE - 990"
+                $dReportIncomplianceStatusState = "NONE"
+                $dReportIncomplianceStatusCode = 990
+                $dReportIncomplianceStatusAction = "No user devices found in Intune."
+            }
+        }
+
+        If ($dUserLastUsedWindowsDevice.approximateLastSignInDateTime -ne $null) {
+            $dApproximateLastSignInDateTime = Get-Date ($($dUserLastUsedWindowsDevice.approximateLastSignInDateTime))
+        }
+
+        ### Start scenario checks
+        If ($dIntuneDevice -ne $null -and $dUserLastUsedWindowsDevice.isCompliant -eq $false) {
+            $dIntuneDeviceId = $dIntuneDevice.id
+            $dIntuneDeviceLastSyncDateTime = $dIntuneDevice.LastSyncDateTime
+            
+            $dReportDeviceLastSeenDays = [math]::Floor(((Get-Date)-$dApproximateLastSignInDateTime).TotalDays)
+            $dReportDeviceLastSeenDateTime = $dApproximateLastSignInDateTime
+            $dReportDeviceLastSyncDateTime = $($dIntuneDevice.lastSyncDateTime)
+            $dReportDeviceEnrollmentDateTime = $($dIntuneDevice.enrolledDateTime)
+            
+            ### Check which compliance policy is causing incompliance
+            $dDeviceCompliancePolicyStatesUri = $null
+            $dDeviceCompliancePolicyStatesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$dIntuneDeviceId/deviceCompliancePolicyStates/"
+            $dDeviceIncompliancePolicies = $null
+            $dDeviceIncompliancePolicies = ((Invoke-MgGraphRequest -Method Get -Uri $dDeviceCompliancePolicyStatesUri).value) | Where-Object {$_.state -ne "compliant" -and $_.state -ne "notApplicable" -and $_.platformType -ne "androidWorkProfile"} | Select-Object -Unique
+            
+            ### Scenario 997: The Graph API interface does not return the correct policy compliance state.
+            If ($dDeviceIncompliancePolicies.Count -eq 0) {
+                Write-Output "$dUserName - $($dDevice.displayName) - ERROR - 997"
+                $dReportIncomplianceStatusState = "ERROR"
+                $dReportIncomplianceStatusCode = 997
+                $dReportIncomplianceStatusAction = "Policy Retrieval Error. Manual check in Intune is required!"
+            }
+            
+            ### Determine the policies which cause incompliancy.
+            If ($dDeviceIncompliancePolicies.Count -gt 0) {
+                $dDeviceIncompliantPolicyNumber = 0
+                Foreach ($dDeviceIncompliancePolicy in $dDeviceIncompliancePolicies) {
+                    $dDeviceIncompliantPolicyNumber++
+                    $dReportDeviceIncompliantPolicyVariable = "sReportDeviceIncompliantPolicy"+$dDeviceIncompliantPolicyNumber
+                    $dReportDeviceIncompliantPolicySettingsVariable = "sReportDeviceIncompliantPolicySettings"+$dDeviceIncompliantPolicyNumber
+
+
+                    $dDeviceCompliancePolicySettingsStatesUri = $null                        
+                    $dDeviceCompliancePolicySettingsStatesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$dIntuneDeviceId/deviceCompliancePolicyStates/$($dDeviceIncompliancePolicy.id)/settingStates"
+                    $dDeviceIncompliancePolicySettingsStates = $null
+                    $dDeviceIncompliancePolicySettingsStates = ((Invoke-MgGraphRequest -Method Get -Uri $dDeviceCompliancePolicySettingsStatesUri).value) | Where-Object {$_.state -ne "compliant" -and $_.state -ne "notApplicable"}
+                    
+                    $dSettingStates = $null
+                    Foreach ($dDeviceIncompliancePolicySettingState in $dDeviceIncompliancePolicySettingsStates) {
+                        $dSettingName = $null
+                        $dSettingName = ($dDeviceIncompliancePolicySettingState.setting).split(".")[-1]
+                        $dSettingState = $null
+                        $dSettingState = ($dDeviceIncompliancePolicySettingState.state)
+                        $dSettingName = Switch -Exact ($dSettingName) {
+                            ActiveFirewallRequired {"Firewall";Break}
+                            AntivirusRequired {"Antivirus";Break}
+                            BitLockerEnabled {"BitLocker";Break}
+                            CodeIntegrityEnabled {"Code Integrity";Break}
+                            DefenderEnabled {"Microsoft Defender Antimalware";Break}
+                            RequireDeviceCompliancePolicyAssigned {"Has a compliance policy assigned";Break}
+                            RequireUserExistence {"Enrolled user exists";Break}
+                            RtpEnabled {"Real-time protection";Break}
+                            SecureBootEnabled {"Secure Boot";Break}
+                            SignatureOutOfDate {"Microsoft Defender Antimalware security intelligence up-to-date";Break}
+                            StorageRequireEncryption {"Encryption of data storage on device";Break}
+                            default {"$dSettingName"}
+                        }
+                        $dSettingStates += "$dSettingName `(State: $dSettingState`), "
+                    }
+                    $dSettingStates = $dSettingStates -replace ".$"
+                    Set-Variable -Name $dReportDeviceIncompliantPolicyVariable -Value "$($dDeviceIncompliancePolicy.displayName) `(State: $($dDeviceIncompliancePolicy.state)`)"
+                    Set-Variable -Name $dReportDeviceIncompliantPolicySettingsVariable -Value $dSettingStates
+                }
+            }
+            
+            ### Scenario 1: Fix incompliance due to System Account policy incompliance. 
+            If ($dDeviceIncompliancePolicies -contains "Default Device Compliance Policy" -or $dDeviceIncompliancePolicies -eq $null -and $($dDeviceIncompliancePolicies.Count) -eq 1) {
+                $dAADDeviceObjId = $dUserLastUsedWindowsDevice.Id
+                $dChangeDate = $null
+                If ($dFixSystemAccountComplianceGroupMembers.Id -notcontains $dAADDeviceObjId) {
+                    New-MgGroupMember -GroupId $dFixSystemAccountComplianceGroup -DirectoryObjectId $dAADDeviceObjId
+                    $dReportIncomplianceStatusAction = "System Account Issue. Device added to `"System Account Compliance Fix`" group."
+                }
+                Else {
+                    
+                    $dChangeDate = (Get-MgAuditLogDirectoryAudit -Filter "Category eq 'GroupManagement' and OperationType eq 'Assign' and TargetResources/any(tr:tr/Id eq '$dFixSystemAccountComplianceGroup') and Result eq 'success'" | Select-Object -Property ActivityDateTime -ExpandProperty TargetResources | Where-Object {$_.Id -eq $dAADDeviceObjId} | Sort-Object -Descending | Select-Object -First 1).ActivityDateTime
+                    $dReportIncomplianceStatusAction = "System Account Issue. Device already in `"System Account Compliance Fix`" group, since $dChangeDate."
+                }
+                Write-Output "$dUserName - $($dDevice.displayName) - ACTIVE - 1"
+                $dReportIncomplianceStatusState = "ACTIVE"
+                $dReportIncomplianceStatusCode = 1
+            }                  
+            
+            ### Scenario 2: Check for Defender issues (10-2023).
+            If ($dReportIncomplianceStatusCode -eq $null -and $dDeviceIncompliancePolicySettingsStates.Count -eq 2 -and $dDeviceIncompliancePolicySettingsStates.setting -match "Windows10CompliancePolicy.DefenderEnabled" -and $dDeviceIncompliancePolicySettingsStates.setting -match "Windows10CompliancePolicy.RtpEnabled") {
+                Write-Output "$dUserName - $($dDevice.displayName) - ACTIVE - 2"
+                $dReportIncomplianceStatusState = "ACTIVE"
+                $dReportIncomplianceStatusCode = 2
+                $dReportIncomplianceStatusAction = "Microsoft Defender Issue. Contact user."
+            }
+
+            ### Scenario 3: Compliance policy in Error state without a reasonable cause.
+            If ($dReportIncomplianceStatusCode -eq $null -and ($dDeviceIncompliancePolicies.state -match "error" -or $dPreviousRunResult.IncomplianceStateCode -eq 3)) {
+                # Check if the Azure Storage Table contains reliable timestamps
+                $dDeviceComplianceDetails = Get-AzureTableRow -Endpoint $dTableServiceEndpoint -SharedAccessSignature $dSASASTokenDeviceComplianceStatus -Table $dSATableNameDeviceComplianceStatus -FilterDefinition "PartitionKey eq '$dIntuneDeviceId'" | Sort-Object TimeStamp -Descending | Select-Object -First $dRequiredAmountOfReliableComplianceEntries
+                $dReliableComplianceDetailsTimestamp = (Get-Date -Date $dUserLastUsedWindowsDevice.approximateLastSignInDateTime).AddHours(-24)
+                $dReliableComplianceDetailsTimestampCount = 0
+                Foreach ($dDeviceComplianceDetail in $dDeviceComplianceDetails) {
+                    If ($dDeviceComplianceDetail.Timestamp -ge $dReliableComplianceDetailsTimestamp) {
+                        $dReliableComplianceDetailsTimestampCount++
+                    }
+                }
+                
+                ### Check Compliance details for each of the reliable timestamps
+                $dDeviceComplianceCheck = 0
+                If ($dReliableComplianceDetailsTimestampCount -eq $dRequiredAmountOfReliableComplianceEntries) {
+                    Foreach ($dDeviceComplianceDetail in $dDeviceComplianceDetails) {
+                        If ($dDeviceComplianceDetail.AIKPresent -eq $true -and 
+                        $dDeviceComplianceDetail.DEPPolicy -eq 2 -and 
+                        $dDeviceComplianceDetail.BitLockerStatus -eq 1 -and
+                        $dDeviceComplianceDetail.SecureBootEnabled -eq 1 -and
+                        $dDeviceComplianceDetail.TPMEnabled -eq 1) {
+                        $dDeviceComplianceCheck++
+                        }
+                    }
+                }
+                
+                $dChangeDate = $null
+                If ($dDeviceComplianceCheck -eq $dRequiredAmountOfReliableComplianceEntries) {
+                    $dAADDeviceObjId = $dUserLastUsedWindowsDevice.Id
+                    If ($dFixCommonComplianceGroupMembers.Id -notcontains $dAADDeviceObjId) {
+                        New-MgGroupMember -GroupId $dFixCommonComplianceGroup -DirectoryObjectId $dAADDeviceObjId
+                        $dReportIncomplianceStatusAction = "Error State Issue. Device added to `"Common Compliance Fix`" group."
+                    }
+                    Else {
+                        $dChangeDate = (Get-MgAuditLogDirectoryAudit -Filter "Category eq 'GroupManagement' and OperationType eq 'Assign' and targetResources/any(tr:tr/Id eq '$dFixCommonComplianceGroup') and Result eq 'success'" | Select-Object -Property ActivityDateTime -ExpandProperty TargetResources | Where-Object {$_.Id -eq $dAADDeviceObjId} | Sort-Object -Descending | Select-Object -First 1).ActivityDateTime
+                        $dReportIncomplianceStatusAction = "Error State Issue. Device already in `"Common Compliance Fix`" group, since $dChangeDate."
+                    }
+                }
+                Else {
+                    $dReportIncomplianceStatusAction = "Error State Issue. Fix could not be applied. Device will be re-evaluated during the next cycle!"
+                }
+                Write-Output "$dUserName - $($dDevice.displayName) - ACTIVE - 3"
+                $dReportIncomplianceStatusState = "ACTIVE"
+                $dReportIncomplianceStatusCode = 3
+            }
+            
+            ### Scenario 4: Generic incompliancy
+            If ($dReportIncomplianceStatusCode -eq $null -and $dDeviceIncompliancePolicies.state -match "nonCompliant") {
+                Write-Output "$dUserName - $($dDevice.displayName) - ACTIVE - 4"
+                $dReportIncomplianceStatusState = "ACTIVE"
+                $dReportIncomplianceStatusCode = 4
+                $dReportIncomplianceStatusAction = "Generic incompliancy, manual interaction is required!"
+            }
+
+            ### Scenario 998: No applicable scenario found
+            If ($dReportIncomplianceStatusCode -eq $null) {
+                Write-Output "$dUserName - $($dDevice.displayName) - ERROR - 998"
+                $dReportIncomplianceStatusState = "ERROR"
+                $dReportIncomplianceStatusCode = 998
+                $dReportIncomplianceStatusAction = "No applicable scenario found!"
+            }
+        }
+        ### Scenario 999: Azure AD device though not Intune managed
+        ElseIf ($dUserLastUsedWindowsDevice.IsCompliant -eq $false) {
+            Write-Output "$dUserName - $($dDevice.displayName) - ERROR - 999"
+            $dReportIncomplianceStatusState = "ERROR"
+            $dReportIncomplianceStatusCode = 999
+            $dReportIncomplianceStatusAction = "No Intune device`(s`) found for the user!"            
+        }
+    }
+    
+    ### Determine first run time
+    If ($dPreviousRunResult.FirstReportDateTime -eq $null) {
+        $dFirstReportDateTime = (Get-Date)
+    }
+    Else {
+        $dFirstReportDateTime = $dPreviousRunResult.FirstReportDateTime
+    }
+
+    ### Actions to take when device is compliant again.
+    If ($dUserLastUsedWindowsDevice.IsCompliant -eq $true -and $dPreviousRunResult -ne $null -and $dReportIncomplianceStatusCode -eq $null) {
+        If ($dFixSystemAccountComplianceGroupMembers -contains $($dPreviousRunResult.AADDeviceId)) {
+            Try {
+                Remove-MgGroupMemberByRef -GroupId $dFixSystemAccountComplianceGroup -DirectoryObjectId $($dPreviousRunResult.AADDeviceId)
+                $dReportIncomplianceStatusAction = "Succesfully removed device from group the `"Fix System Account`" group."
+            }
+            Catch {
+                $dReportIncomplianceStatusAction = "An error occured while trying to remove the device from the `"Fix System Account`" group!"
+            }
+        }
+        If ($dFixCommonComplianceGroupMembers -contains $($dPreviousRunResult.AADDeviceId)) {
+            Try {
+                Remove-MgGroupMemberByRef -GroupId $dFixCommonComplianceGroup -DirectoryObjectId $($dPreviousRunResult.AADDeviceId)
+                $dReportIncomplianceStatusAction = "Succesfully removed device from the `"Fix Common Compliance`" group."
+            }
+            Catch {
+                $dReportIncomplianceStatusAction = "An error occured while trying to remove the device from the `"Fix Common Compliance`" group!"
+            }
+        }
+        If ($dReportIncomplianceStatusAction -eq $null) {
+            $dReportIncomplianceStatusAction = "None"
+        }
+        Write-Output "$dUserName - RESOLVED - 0"
+        $dReportIncomplianceStatusState = "RESOLVED"
+        $dReportIncomplianceStatusCode = "0"
+        
+        $dUserLastUsedWindowsDevice = "$dPreviousRunResult.AADDeviceName"
+        $dIntuneDevice = "$dPreviousRunResult.IntuneDeviceName"
+        If ($dPreviousRunResult.ResolvedDateTime -eq $null -or $dPreviousRunResult.ResolvedDateTime -eq "") {
+            $dResolvedDateTime = (Get-Date)
+        }
+        Else {
+            $dResolvedDateTime = $dPreviousRunResult.ResolvedDateTime
+        }
+    }    
+    If ($dReportIncomplianceStatusCode -ne $null) {
+        $dPartitionKey = $null
+        $dPartitionKey = $dUserName
+
+        $dRowKey = $null
+        $dRowKey = $dUserObjectId
+
+        $dTableData = $null
+        $dTableData = [Ordered]@{
+            "PartitionKey" = "$dPartitionKey"
+            "RowKey" = "$dRowKey"
+            "AADDeviceName" = "$($dUserLastUsedWindowsDevice.displayName)"
+            "AADDeviceId" = "$($dUserLastUsedWindowsDevice.Id)"
+            "IntuneDeviceName" = "$($dIntuneDevice.DeviceName)"
+            "LastSeenInDays" = "$dReportDeviceLastSeenDays"
+            "LastSeenDateTime" = "$dReportDeviceLastSeenDateTime"
+            "LastSyncDateTime" = "$dReportDeviceLastSyncDateTime"
+            "EnrollmentDateTime" = "$dReportDeviceEnrollmentDateTime"
+            "IncomplianceStatusState" = "$dReportIncomplianceStatusState"
+            "IncomplianceStateCode" = "$dReportIncomplianceStatusCode"
+            "IncomplianceStateAction" = "$dReportIncomplianceStatusAction"
+            "FirstReportDateTime" = "$dFirstReportDateTime"
+            "ResolvedDateTime" = "$dResolvedDateTime"
+        }
+            
+        Try {
+            Insert-AzureTableRow -Endpoint $dTableServiceEndpoint -SharedAccessSignature $dSASASTokenUserDeviceComplianceManagement -Table $dSATableNameUserDeviceComplianceManagement -TableData $dTableData | Out-Null
+        }
+        Catch {
+            Try {
+                Update-AzureTableRow -Endpoint $dTableServiceEndpoint -SharedAccessSignature $dSASASTokenUserDeviceComplianceManagement -Table $dSATableNameUserDeviceComplianceManagement -TableData $dTableData | Out-Null
+            }
+            Catch {
+                Write-Error "An error occured while trying to update the table entry for Team `"$dPartitionKey`" with Id `"$dRowKey`"."
+            }
+        }
+    }
+}
+
+#Remove-Item -Path $dTempPath -Recurse -Force
+
+Exit $exitCode
